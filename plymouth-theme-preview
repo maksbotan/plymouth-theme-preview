@@ -1,0 +1,161 @@
+#!/usr/bin/env
+
+# vim:ft=python
+
+import gtk, dbus
+
+def dbus_error_catcher(f):
+    def __wrapper(self, *a, **k):
+        try:
+            self._authorized = True
+            return f(self, *a, **k)
+        except dbus.DBusException as e:
+            if 'NotAuthorizedException' in e.get_dbus_name():
+                self.error("You are must authorize as root to configure plymouth", critical=True)
+            else:
+                self.error("Error ocquired while communicating helper", e.get_dbus_message())
+            self._authorized = False
+
+    return __wrapper
+
+
+class MainWindow():
+
+    _authorized = False
+    _theme = ''
+
+    def __init__(self):
+        self.window = gtk.Window()
+
+        vbox = gtk.VBox()
+        self.window.add(vbox)
+
+        self.current_theme_label = gtk.Label()
+        self.current_theme_label.set_markup("Current plymouth theme: ")
+        vbox.pack_start(self.current_theme_label, expand=False)
+
+        self.preview_controls = gtk.HBox()
+        self.preview_controls.pack_start(gtk.Label("Preview duration:"), False)
+        adj = gtk.Adjustment(value=5, lower=1, upper=1000, step_incr=1)
+        self.preview_duration = gtk.SpinButton(adj)
+        self.preview_duration.set_numeric(True)
+        self.preview_controls.pack_start(self.preview_duration)
+        vbox.pack_start(self.preview_controls, False)
+
+        self.g_themes_list = gtk.ListStore(int, str)
+        self.tree_view = gtk.TreeView(self.g_themes_list)
+        column = gtk.TreeViewColumn('Theme')
+        cell_renderer = gtk.CellRendererText()
+        column.pack_start(cell_renderer)
+        column.set_attributes(cell_renderer, text=1)
+        self.tree_view.append_column(column)
+        vbox.pack_start(self.tree_view)
+
+        self.controls = gtk.HBox()
+        self.preview_button = gtk.Button("Preview")
+        self.select_button = gtk.Button("Set as default")
+        self.controls.pack_start(self.preview_button, True, False)
+        self.controls.pack_start(self.select_button, True, False)
+        self.preview_button.connect('clicked', self.preview)
+        self.select_button.connect('clicked', self.select)
+        vbox.pack_start(self.controls, False)
+
+        self.window.connect('destroy', self.quit)
+
+
+    def start(self):
+        self.window.show_all()
+        self.init_dbus_object()
+
+        self.list_available_themes()
+        self.query_current_theme()
+
+
+    def quit(self, *args):
+        try:
+            if self.d_helper is not None and self._authorized:
+                self.d_helper.StopPlymouthd()
+        except dbus.DBusException as e:
+            pass
+        gtk.main_quit()
+
+
+    def init_dbus_object(self):
+        try:
+            bus = dbus.SystemBus()
+            helper_object = bus.get_object("ru.gentoo.plymouth_theme_preview_helper", "/PlymouthThemePreviewHelper")
+            self.d_helper = dbus.Interface(helper_object, "ru.gentoo.plymouth_theme_preview_helper")
+        except dbus.DBusException as e:
+            self.d_helper = None
+            self.error("D-Bus connection to helper cannot be established", e.get_dbus_message(), critical=True)
+
+
+    @dbus_error_catcher
+    def list_available_themes(self):
+        self.themes = self.d_helper.ListThemes()
+
+        self.g_themes_list.clear()
+        for i, theme in enumerate(self.themes):
+            self.g_themes_list.append([i, theme])
+
+    @dbus_error_catcher
+    def query_current_theme(self):
+        self._theme = self.d_helper.GetCurrentTheme()
+
+        index = self.themes.index(self._theme)
+        self.current_theme_label.set_markup("Current plymouth theme: <b>{0}</b>".format(self._theme))
+        self.tree_view.set_cursor(index)
+
+
+    @dbus_error_catcher
+    def preview(self, *args):
+        path, _ = self.tree_view.get_cursor()
+        if path is None:
+            return
+        theme = self.g_themes_list[path][1]
+        self.d_helper.StartPlymouthd()
+        if theme != self._theme:
+            self.d_helper.SelectTheme(theme)
+        self.d_helper.RunSimulation(self.preview_duration.get_value_as_int())
+        if theme != self._theme:
+            self.d_helper.SelectTheme(self._theme)
+        self.d_helper.StopPlymouthd()
+
+
+    @dbus_error_catcher
+    def select(self, *args):
+        path, _ = self.tree_view.get_cursor()
+        if path is None:
+            return
+        theme = self.g_themes_list[path][1]
+        if theme == self._theme:
+            return
+
+        self.d_helper.SelectTheme(theme)
+        self.query_current_theme()
+
+    def error(self, message, reason='', critical=False):
+        dialog = gtk.MessageDialog(
+            type=gtk.MESSAGE_ERROR,
+            buttons=gtk.BUTTONS_CLOSE,
+            message_format=message
+        )
+        if reason:
+            dialog.format_secondary_text(reason)
+        dialog.run()
+        dialog.destroy()
+
+        if critical:
+            self.tree_view.set_sensitive(False)
+            self.controls.set_sensitive(False)
+            self.preview_controls.set_sensitive(False)
+            self.current_theme_label.set_markup("<span foreground='red' weight='bold'>{0}</span>".format(message))
+
+
+if __name__ == '__main__':
+    main_window = MainWindow()
+    main_window.start()
+    try:
+        gtk.main()
+    except KeyboardInterrupt:
+        main_window.quit()

@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=ru.gentoo.plymouth_theme_preview_helper
+Exec=/usr/libexec/plymouth-theme-preview-helper
+User=root

@@ -1,0 +1,145 @@
+#!/usr/bin/env python
+
+# vim:ft=python
+
+SERVICE_NAME="ru.gentoo.plymouth_theme_preview_helper"
+ACTION_NAME="ru.gentoo.plymouth_theme_preview.use_plymouthd"
+
+import gobject
+import dbus
+import dbus.service
+import dbus.mainloop.glib
+import slip.dbus.service
+import logging, logging.handlers
+import subprocess, time
+
+from functools import wraps
+
+class PlymouthException(dbus.DBusException):
+    _dbus_error_name = 'ru.gentoo.plymouth_theme_preview_helper.PlymouthException'
+
+def check_plymouthd_running(f):
+    @wraps(f)
+    def __wrapper(self, *args, **kwargs):
+        if not self._plymouthd_running:
+            self.StartPlymouthd()
+        return f(self, *args, **kwargs)
+
+    return __wrapper
+
+class PlymouthHelper(slip.dbus.service.Object):
+
+    _plymouthd_running = False
+
+    @slip.dbus.polkit.require_auth(ACTION_NAME)
+    @dbus.service.method(SERVICE_NAME, in_signature='', out_signature='')
+    def StartPlymouthd(self):
+        logger.debug("Starting plymouthd...")
+
+        if self._plymouthd_running:
+            return
+
+        subprocess.call(['/sbin/plymouthd'])
+        self._plymouthd_running = True
+
+
+    @slip.dbus.polkit.require_auth(ACTION_NAME)
+    @dbus.service.method(SERVICE_NAME, in_signature='', out_signature='')
+    def StopPlymouthd(self):
+        logger.debug("Stopping plymouthd...")
+
+        if not self._plymouthd_running:
+            return
+
+        result = subprocess.call(['plymouth', 'quit'])
+        if result != 0:
+            raise PlymouthException("'plymouth quit' exited with {}".format(result))
+
+        self._plymouthd_running = False
+
+
+    def ShowSplash(self):
+        result = subprocess.call(['plymouth', '--show-splash'])
+        if result != 0:
+            raise PlymouthException("'plymouth --show-splash' exited with {}".format(result))
+
+
+    def HideSplash(self):
+        result = subprocess.call(['plymouth', '--hide-splash'])
+        if result != 0:
+            raise PlymouthException("'plymouth --hide-splash' exited with {}".format(result))
+
+
+    @slip.dbus.polkit.require_auth(ACTION_NAME)
+    @dbus.service.method(SERVICE_NAME, in_signature='', out_signature='s')
+    def GetCurrentTheme(self):
+        logger.debug("Returning current plymouth theme...")
+
+        try:
+            theme = subprocess.check_output(['/usr/sbin/plymouth-set-default-theme'])
+        except subprocess.CalledProcessError as e:
+            raise PlymouthException("'plymouth-set-default-theme' exited with {}".format(e.returncode))
+        return theme.strip()
+
+
+    @slip.dbus.polkit.require_auth(ACTION_NAME)
+    @dbus.service.method(SERVICE_NAME, in_signature='', out_signature='as')
+    def ListThemes(self):
+        logger.debug("Listing plymouth themes...")
+
+        try:
+            themes = subprocess.check_output(['/usr/sbin/plymouth-set-default-theme', '--list'])
+        except subprocess.CalledProcessError as e:
+            raise PlymouthException("'plymouth-set-default-theme' exited with {}".format(e.returncode))
+        return themes.split()
+
+
+    @slip.dbus.polkit.require_auth(ACTION_NAME)
+    @dbus.service.method(SERVICE_NAME, in_signarute='s', out_signature='')
+    def SelectTheme(self, theme):
+        logger.debug("Setting plymouth theme to {}...".format(theme))
+
+        result = subprocess.call(['/usr/sbin/plymouth-set-default-theme', theme])
+        if result == 1:
+            raise PlymouthException("{} plymouth theme does not exist".format(theme))
+        elif result !=0:
+            raise PlymouthException("'plymouth-set-default-theme exited with {}".format(result))
+
+
+    @check_plymouthd_running
+    @slip.dbus.polkit.require_auth(ACTION_NAME)
+    @dbus.service.method(SERVICE_NAME, in_signarute='i', out_signature='')
+    def RunSimulation(self, duration):
+        logger.debug("Running simulation for {} seconds...".format(duration))
+
+        self.ShowSplash()
+        try:
+            subprocess.check_call(['plymouth', '--show-splash'])
+            for i in xrange(duration):
+                subprocess.check_call(['plymouth', '--update=test{}'.format(i)])
+                time.sleep(1)
+        except subprocess.CalledProcessError as e:
+            raise PlymouthException("Simulation failed with code {}".format(e.returncode))
+        finally:
+            self.HideSplash()
+
+
+if __name__ == '__main__':
+    logger = logging.getLogger('plymouth_theme_preview_helper')
+    logger.setLevel(logging.DEBUG)
+    syslog = logging.handlers.SysLogHandler('/dev/log')
+    formatter = logging.Formatter('%(name)s: %(levelname)s %(message)s')
+    syslog.setFormatter(formatter)
+    logger.addHandler(logging.StreamHandler())
+    logger.addHandler(syslog)
+
+    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    bus = dbus.SystemBus()
+    name = dbus.service.BusName(SERVICE_NAME, bus)
+
+    object = PlymouthHelper(bus, '/PlymouthThemePreviewHelper')
+    mainloop = gobject.MainLoop()
+    slip.dbus.service.set_mainloop(mainloop)
+
+    logger.debug("Starting plymouth theme preview helper service")
+    mainloop.run()
